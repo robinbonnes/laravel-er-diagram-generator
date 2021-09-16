@@ -8,6 +8,7 @@ use Illuminate\Database\Eloquent\Relations\Relation;
 use Illuminate\Support\Collection;
 use ReflectionClass;
 use ReflectionMethod;
+use ReflectionProperty;
 use Illuminate\Support\Arr;
 
 
@@ -40,6 +41,23 @@ class RelationFinder
             $relations = $relations->merge($this->getRelationshipFromMethodAndModel($method, $model));
         });
 
+        $properties = Collection::make($class->getProperties(ReflectionMethod::IS_PUBLIC))
+            ->reject(function (ReflectionProperty $property) use ($model) {
+                return $property->class !== $model;
+            });
+            
+        $properties->map(function (ReflectionProperty $property) use ($model, &$relations) {
+            try {
+                $instance = app($model);
+                $propertyValue = $instance->{$property->getName()};
+                if (is_array($propertyValue)) {
+                    foreach (array_keys($propertyValue) as $relationName) {
+                        $relations = $relations->merge($this->getRelationshipFromRelationNameAndModel($relationName, $model));
+                    }
+                }
+            } catch (\Throwable $e) {}
+        });
+        
         $relations = $relations->filter();
 
         if ($ignoreRelations = Arr::get(config('erd-generator.ignore', []),$model))
@@ -98,5 +116,43 @@ class RelationFinder
         } catch (\Throwable $e) {}
         return null;
     }
+    
+    /**
+     * @param String $relationName
+     * @param string $model
+     * @return array|null
+     */
+    protected function getRelationshipFromRelationNameAndModel($relationName, string $model)
+    {
+        try {
+            $instance = app($model);
+            $relation = $instance->{$relationName}();
+            
+            if ($relation instanceof Relation) {
+                $localKey = null;
+                $foreignKey = null;
 
+                if ($relation instanceof HasOneOrMany) {
+                    $localKey = $this->getParentKey($return->getQualifiedParentKeyName());
+                    $foreignKey = $return->getForeignKeyName();
+                }
+
+                if ($relation instanceof BelongsTo) {
+                    $foreignKey = $this->getParentKey($relation->getQualifiedOwnerKeyName());
+                    $localKey = method_exists($relation, 'getForeignKeyName') ? $relation->getForeignKeyName() : $relation->getForeignKey();
+                }
+
+                return [
+                    $relationName => new ModelRelation(
+                        $relationName,
+                        (new ReflectionClass($relation))->getShortName(),
+                        (new ReflectionClass($relation->getRelated()))->getName(),
+                        $localKey,
+                        $foreignKey
+                    )
+                ];
+            }
+        } catch (\Throwable $e) {}
+        return null;
+    }
 }
